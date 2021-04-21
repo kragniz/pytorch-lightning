@@ -16,43 +16,46 @@ pr:
   - master
   - release/*
 
+variables:
+- name: poplar_sdk
+  value: "poplar_sdk-ubuntu_20_04-2.0.0+481-79b41f85d1"
+
 jobs:
-  - job: pytest
-    # how long to run the job before automatically cancelling
-    timeoutInMinutes: 45
-    # how much time to give 'run always even if cancelled tasks' before stopping them
-    cancelTimeoutInMinutes: 2
+  - job: ipu
 
-    pool: gridai-spot-pool
-
-    #strategy:
-    #  matrix:
-    #    PT16:
-    #      torch.version: '1.6'
-    #      python.version: '3.7'
-
-    # ToDo: this need to have installed docker in the base image...
-    #container: pytorchlightning/pytorch_lightning:base-cuda-py3.7-torch1.6
-    #container: "pytorchlightning/pytorch_lightning:base-cuda-py$[ variables['python.version'] ]-torch1.6"
-    container:
-      # base ML image: mcr.microsoft.com/azureml/openmpi3.1.2-cuda10.2-cudnn8-ubuntu18.04
-      image: "pytorchlightning/pytorch_lightning:base-cuda-py3.7-torch1.6"
-      #endpoint: azureContainerRegistryConnection
-      options: "--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all"
-
-    workspace:
-      clean: all
+    pool: ipu-ubuntu-20.04
 
     steps:
+    - script: tar -xvzf /opt/poplar/${{ variables.poplar_sdk }}.tar.gz
+      displayName: "Extract Poplar SDK"
 
-    - bash: |
-        lspci | egrep 'VGA|3D'
-        whereis nvidia
-        nvidia-smi
-        python --version
-        pip --version
-        pip list
-      displayName: 'Image info & NVIDIA'
+    - script: |
+        set -eux
+        #apt-get update
+        #apt-get install python3 python3-pip
+      displayName: "Install python"
+
+    - script: |
+        set -eux
+        pip debug --verbose
+        pip install ${{ variables.poplar_sdk }}/poptorch-*ubuntu*.whl
+      displayName: "Install poptorch"
+
+    - script: |
+        set -eux
+        source ${{ variables.poplar_sdk }}/poplar-ubuntu*/enable.sh
+        NUM_IPUS=$(gc-info --ipu-count)
+        if [[ -z "${NUM_IPUS}" ]] || [[ "${NUM_IPUS}" -eq 0 ]]; then
+            echo "No IPUs found to reset. Exiting"
+            exit 1
+        fi
+        echo "Resetting parity on ${NUM_IPUS} IPU devices"
+        i=0
+        while [[ i -lt  "${NUM_IPUS}" ]]; do
+            gc-reset -d "${i}"
+            i=$((i + 1))
+        done
+      displayName: "Reset IPU devices"
 
     - bash: |
         export GIT_TERMINAL_PROMPT=1
@@ -62,14 +65,20 @@ jobs:
         python -c "fname = 'requirements/extra.txt' ; lines = [line for line in open(fname).readlines() if 'fairscale' not in line] ; open(fname, 'w').writelines(lines)"
         python -c "fname = 'requirements/extra.txt' ; lines = [line for line in open(fname).readlines() if 'horovod' not in line] ; open(fname, 'w').writelines(lines)"
         pip install --requirement ./requirements/devel.txt --upgrade-strategy only-if-needed
-        pip install git+https://$(AUTH_TOKEN)@github.com/PyTorchLightning/lightning-dtrun.git@v0.0.2 --no-cache-dir
         pip list
       displayName: 'Install dependencies'
 
     - bash: |
         python tests/collect_env_details.py
-        python -c "import torch ; mgpu = torch.cuda.device_count() ; assert mgpu >= 2, f'GPU: {mgpu}'"
+        python -c "import torch"
       displayName: 'Env details'
+
+    - script: |
+        set -eux
+        source ${{ variables.poplar_sdk }}/poplar-ubuntu*/enable.sh
+        source ${{ variables.poplar_sdk }}/popart-ubuntu*/enable.sh
+        python -c "import poptorch; print(poptorch.__version__)"
+      displayName: "Check poptorch installation"
 
     - bash: |
         wget https://pl-public-data.s3.amazonaws.com/legacy/checkpoints.zip -P legacy/
@@ -78,49 +87,15 @@ jobs:
       displayName: 'Get legacy checkpoints'
 
     - bash: |
+        source ${{ variables.poplar_sdk }}/poplar-ubuntu*/enable.sh
+        source ${{ variables.poplar_sdk }}/popart-ubuntu*/enable.sh
+
         python -m coverage run --source pytorch_lightning -m pytest pytorch_lightning tests -v --junitxml=$(Build.StagingDirectory)/test-results.xml --durations=50
       displayName: 'Testing: standard'
 
-    - bash: |
-        sh tests/special_tests.sh
-      displayName: 'Testing: special'
-
-    - bash: |
-        python -m coverage report
-        python -m coverage xml
-        python -m coverage html
-        python -m codecov --token=$(CODECOV_TOKEN) --commit=$(Build.SourceVersion) --flags=gpu,pytest --name="GPU-coverage" --env=linux,azure
-        ls -l
-      displayName: 'Statistics'
-
-    - task: PublishTestResults@2
-      displayName: 'Publish test results'
-      inputs:
-        testResultsFiles: '$(Build.StagingDirectory)/test-results.xml'
-        testRunTitle: '$(Agent.OS) - $(Build.DefinitionName) - Python $(python.version)'
-      condition: succeededOrFailed()
-
-    - task: PublishCodeCoverageResults@1
-      displayName: 'Publish coverage report'
-      inputs:
-        codeCoverageTool: 'cobertura'
-        summaryFileLocation: 'coverage.xml'
-        reportDirectory: '$(Build.SourcesDirectory)/htmlcov'
-        testRunTitle: '$(Agent.OS) - $(Build.BuildNumber)[$(Agent.JobName)] - Python $(python.version)'
-      condition: succeededOrFailed()
-
-    - bash: |
-        python -m pytest benchmarks -v --maxfail=2 --durations=0
-      displayName: 'Testing: benchmarks'
-
     - script: |
-        set -e
-        python -m pytest pl_examples -v --maxfail=2 --durations=0
-        python setup.py install --user --quiet
-        bash pl_examples/run_ddp-example.sh
-        # cd pl_examples/basic_examples
-        # bash submit_ddp_job.sh
-        # bash submit_ddp2_job.sh
-      env:
-        PL_USE_MOCKED_MNIST: "1"
-      displayName: 'Examples'
+        set -eux
+        source ${{ variables.poplar_sdk }}/poplar-ubuntu*/enable.sh
+        source ${{ variables.poplar_sdk }}/popart-ubuntu*/enable.sh
+        python poptorch-example.py
+      displayName: "Run poptorch example"
