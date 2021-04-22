@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from pytorch_lightning import _logger as log
-from pytorch_lightning import LightningModule
+from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.overrides.base import _LightningModuleWrapperBase
 from pytorch_lightning.plugins.training_type.training_type_plugin import TrainingTypePlugin
 from pytorch_lightning.utilities import _POPTORCH_AVAILABLE
